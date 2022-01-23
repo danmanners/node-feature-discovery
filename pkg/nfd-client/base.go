@@ -55,7 +55,11 @@ type Args struct {
 	Klog map[string]*utils.KlogFlagVal
 }
 
-var nodeName = os.Getenv("NODE_NAME")
+var nodeName string
+
+func init() {
+	nodeName = os.Getenv("NODE_NAME")
+}
 
 // NodeName returns the name of the k8s node we're running on.
 func NodeName() string { return nodeName }
@@ -67,13 +71,13 @@ func NewNfdBaseClient(args *Args) (NfdBaseClient, error) {
 	// Check TLS related args
 	if args.CertFile != "" || args.KeyFile != "" || args.CaFile != "" {
 		if args.CertFile == "" {
-			return nfd, fmt.Errorf("--cert-file needs to be specified alongside --key-file and --ca-file")
+			return nfd, fmt.Errorf("-cert-file needs to be specified alongside -key-file and -ca-file")
 		}
 		if args.KeyFile == "" {
-			return nfd, fmt.Errorf("--key-file needs to be specified alongside --cert-file and --ca-file")
+			return nfd, fmt.Errorf("-key-file needs to be specified alongside -cert-file and -ca-file")
 		}
 		if args.CaFile == "" {
-			return nfd, fmt.Errorf("--ca-file needs to be specified alongside --cert-file and --key-file")
+			return nfd, fmt.Errorf("-ca-file needs to be specified alongside -cert-file and -key-file")
 		}
 	}
 

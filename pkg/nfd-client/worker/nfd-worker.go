@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -31,26 +32,29 @@ import (
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/yaml"
 
+	"sigs.k8s.io/node-feature-discovery/pkg/api/feature"
 	pb "sigs.k8s.io/node-feature-discovery/pkg/labeler"
 	nfdclient "sigs.k8s.io/node-feature-discovery/pkg/nfd-client"
 	"sigs.k8s.io/node-feature-discovery/pkg/utils"
 	"sigs.k8s.io/node-feature-discovery/pkg/version"
 	"sigs.k8s.io/node-feature-discovery/source"
-	"sigs.k8s.io/node-feature-discovery/source/cpu"
-	"sigs.k8s.io/node-feature-discovery/source/custom"
-	"sigs.k8s.io/node-feature-discovery/source/fake"
-	"sigs.k8s.io/node-feature-discovery/source/iommu"
-	"sigs.k8s.io/node-feature-discovery/source/kernel"
-	"sigs.k8s.io/node-feature-discovery/source/local"
-	"sigs.k8s.io/node-feature-discovery/source/memory"
-	"sigs.k8s.io/node-feature-discovery/source/network"
-	"sigs.k8s.io/node-feature-discovery/source/pci"
-	"sigs.k8s.io/node-feature-discovery/source/storage"
-	"sigs.k8s.io/node-feature-discovery/source/system"
-	"sigs.k8s.io/node-feature-discovery/source/usb"
+
+	// Register all source packages
+	_ "sigs.k8s.io/node-feature-discovery/source/cpu"
+	_ "sigs.k8s.io/node-feature-discovery/source/custom"
+	_ "sigs.k8s.io/node-feature-discovery/source/fake"
+	_ "sigs.k8s.io/node-feature-discovery/source/iommu"
+	_ "sigs.k8s.io/node-feature-discovery/source/kernel"
+	_ "sigs.k8s.io/node-feature-discovery/source/local"
+	_ "sigs.k8s.io/node-feature-discovery/source/memory"
+	_ "sigs.k8s.io/node-feature-discovery/source/network"
+	_ "sigs.k8s.io/node-feature-discovery/source/pci"
+	_ "sigs.k8s.io/node-feature-discovery/source/storage"
+	_ "sigs.k8s.io/node-feature-discovery/source/system"
+	_ "sigs.k8s.io/node-feature-discovery/source/usb"
 )
 
-// Global config
+// NFDConfig contains the configuration settings of NfdWorker.
 type NFDConfig struct {
 	Core    coreConfig
 	Sources sourcesConfig
@@ -60,7 +64,9 @@ type coreConfig struct {
 	Klog           map[string]string
 	LabelWhiteList utils.RegexpVal
 	NoPublish      bool
-	Sources        []string
+	FeatureSources []string
+	Sources        *[]string
+	LabelSources   []string
 	SleepInterval  duration
 }
 
@@ -69,7 +75,7 @@ type sourcesConfig map[string]source.Config
 // Labels are a Kubernetes representation of discovered features.
 type Labels map[string]string
 
-// Command line arguments
+// Args are the command line arguments of NfdWorker.
 type Args struct {
 	nfdclient.Args
 
@@ -88,7 +94,8 @@ type ConfigOverrideArgs struct {
 	// Deprecated
 	LabelWhiteList *utils.RegexpVal
 	SleepInterval  *time.Duration
-	Sources        *utils.StringSliceVal
+	FeatureSources *utils.StringSliceVal
+	LabelSources   *utils.StringSliceVal
 }
 
 type nfdWorker struct {
@@ -99,17 +106,16 @@ type nfdWorker struct {
 	client         pb.LabelerClient
 	configFilePath string
 	config         *NFDConfig
-	realSources    []source.FeatureSource
 	stop           chan struct{} // channel for signaling stop
-	testSources    []source.FeatureSource
-	enabledSources []source.FeatureSource
+	featureSources []source.FeatureSource
+	labelSources   []source.LabelSource
 }
 
 type duration struct {
 	time.Duration
 }
 
-// Create new NfdWorker instance.
+// NewNfdWorker creates new NfdWorker instance.
 func NewNfdWorker(args *Args) (nfdclient.NfdClient, error) {
 	base, err := nfdclient.NewNfdBaseClient(&args.Args)
 	if err != nil {
@@ -121,25 +127,7 @@ func NewNfdWorker(args *Args) (nfdclient.NfdClient, error) {
 
 		args:   *args,
 		config: &NFDConfig{},
-		realSources: []source.FeatureSource{
-			&cpu.Source{},
-			&iommu.Source{},
-			&kernel.Source{},
-			&memory.Source{},
-			&network.Source{},
-			&pci.Source{},
-			&storage.Source{},
-			&system.Source{},
-			&usb.Source{},
-			&custom.Source{},
-			// local needs to be the last source so that it is able to override
-			// labels from other sources
-			&local.Source{},
-		},
-		testSources: []source.FeatureSource{
-			&fake.Source{},
-		},
-		stop: make(chan struct{}, 1),
+		stop:   make(chan struct{}, 1),
 	}
 
 	if args.ConfigFile != "" {
@@ -154,7 +142,8 @@ func newDefaultConfig() *NFDConfig {
 		Core: coreConfig{
 			LabelWhiteList: utils.RegexpVal{Regexp: *regexp.MustCompile("")},
 			SleepInterval:  duration{60 * time.Second},
-			Sources:        []string{"all"},
+			FeatureSources: []string{"all"},
+			LabelSources:   []string{"all"},
 			Klog:           make(map[string]string),
 		},
 	}
@@ -192,12 +181,20 @@ func (w *nfdWorker) Run() error {
 	for {
 		select {
 		case <-labelTrigger:
+			// Run feature discovery
+			for _, s := range w.featureSources {
+				klog.V(2).Infof("running discovery for %q source", s.Name())
+				if err := s.Discover(); err != nil {
+					klog.Errorf("feature discovery of %q source failed: %v", s.Name(), err)
+				}
+			}
+
 			// Get the set of feature labels.
-			labels := createFeatureLabels(w.enabledSources, w.config.Core.LabelWhiteList.Regexp)
+			labels := createFeatureLabels(w.labelSources, w.config.Core.LabelWhiteList.Regexp)
 
 			// Update the node with the feature labels.
 			if w.client != nil {
-				err := advertiseFeatureLabels(w.client, labels)
+				err := w.advertiseFeatureLabels(labels)
 				if err != nil {
 					return fmt.Errorf("failed to advertise labels: %s", err.Error())
 				}
@@ -301,36 +298,95 @@ func (w *nfdWorker) configureCore(c coreConfig) error {
 	}
 
 	// Determine enabled feature sources
-	sourceList := map[string]struct{}{}
-	all := false
-	for _, s := range c.Sources {
-		if s == "all" {
-			all = true
-			continue
+	featureSources := make(map[string]source.FeatureSource)
+	for _, name := range c.FeatureSources {
+		if name == "all" {
+			for n, s := range source.GetAllFeatureSources() {
+				if ts, ok := s.(source.SupplementalSource); !ok || !ts.DisableByDefault() {
+					featureSources[n] = s
+				}
+			}
+		} else {
+			disable := false
+			strippedName := name
+			if strings.HasPrefix(name, "-") {
+				strippedName = name[1:]
+				disable = true
+			}
+			if s := source.GetFeatureSource(strippedName); s != nil {
+				if !disable {
+					featureSources[name] = s
+				} else {
+					delete(featureSources, strippedName)
+				}
+			} else {
+				klog.Warningf("skipping unknown feature source %q specified in core.featureSources", name)
+			}
 		}
-		sourceList[strings.TrimSpace(s)] = struct{}{}
 	}
 
-	w.enabledSources = []source.FeatureSource{}
-	for _, s := range w.realSources {
-		if _, enabled := sourceList[s.Name()]; all || enabled {
-			w.enabledSources = append(w.enabledSources, s)
-			delete(sourceList, s.Name())
+	w.featureSources = make([]source.FeatureSource, 0, len(featureSources))
+	for _, s := range featureSources {
+		w.featureSources = append(w.featureSources, s)
+	}
+
+	sort.Slice(w.featureSources, func(i, j int) bool { return w.featureSources[i].Name() < w.featureSources[j].Name() })
+
+	// Determine enabled label sources
+	labelSources := make(map[string]source.LabelSource)
+	for _, name := range c.LabelSources {
+		if name == "all" {
+			for n, s := range source.GetAllLabelSources() {
+				if ts, ok := s.(source.SupplementalSource); !ok || !ts.DisableByDefault() {
+					labelSources[n] = s
+				}
+			}
+		} else {
+			disable := false
+			strippedName := name
+			if strings.HasPrefix(name, "-") {
+				strippedName = name[1:]
+				disable = true
+			}
+			if s := source.GetLabelSource(strippedName); s != nil {
+				if !disable {
+					labelSources[name] = s
+				} else {
+					delete(labelSources, strippedName)
+				}
+			} else {
+				klog.Warningf("skipping unknown source %q specified in core.sources (or -sources)", name)
+			}
 		}
 	}
-	for _, s := range w.testSources {
-		if _, enabled := sourceList[s.Name()]; enabled {
-			w.enabledSources = append(w.enabledSources, s)
-			delete(sourceList, s.Name())
-		}
+
+	w.labelSources = make([]source.LabelSource, 0, len(labelSources))
+	for _, s := range labelSources {
+		w.labelSources = append(w.labelSources, s)
 	}
-	if len(sourceList) > 0 {
-		names := make([]string, 0, len(sourceList))
-		for n := range sourceList {
-			names = append(names, n)
+
+	sort.Slice(w.labelSources, func(i, j int) bool {
+		iP, jP := w.labelSources[i].Priority(), w.labelSources[j].Priority()
+		if iP != jP {
+			return iP < jP
 		}
-		klog.Warningf("skipping unknown source(s) %q specified in core.sources (or --sources)", strings.Join(names, ", "))
+		return w.labelSources[i].Name() < w.labelSources[j].Name()
+	})
+
+	if klog.V(1).Enabled() {
+		n := make([]string, len(w.featureSources))
+		for i, s := range w.featureSources {
+			n[i] = s.Name()
+		}
+		klog.Infof("enabled feature sources: %s", strings.Join(n, ", "))
+
+		n = make([]string, len(w.labelSources))
+		for i, s := range w.labelSources {
+			n[i] = s.Name()
+		}
+		klog.Infof("enabled label sources: %s", strings.Join(n, ", "))
 	}
+
 	return nil
 }
 
@@ -338,9 +394,9 @@ func (w *nfdWorker) configureCore(c coreConfig) error {
 func (w *nfdWorker) configure(filepath string, overrides string) error {
 	// Create a new default config
 	c := newDefaultConfig()
-	allSources := append(w.realSources, w.testSources...)
-	c.Sources = make(map[string]source.Config, len(allSources))
-	for _, s := range allSources {
+	confSources := source.GetAllConfigurableSources()
+	c.Sources = make(map[string]source.Config, len(confSources))
+	for _, s := range confSources {
 		c.Sources[s.Name()] = s.NewConfig()
 	}
 
@@ -358,13 +414,19 @@ func (w *nfdWorker) configure(filepath string, overrides string) error {
 			if err != nil {
 				return fmt.Errorf("failed to parse config file: %s", err)
 			}
+
+			if c.Core.Sources != nil {
+				klog.Warningf("found deprecated 'core.sources' config file option, please use 'core.labelSources' instead")
+				c.Core.LabelSources = *c.Core.Sources
+			}
+
 			klog.Infof("configuration file %q parsed", filepath)
 		}
 	}
 
 	// Parse config overrides
 	if err := yaml.Unmarshal([]byte(overrides), c); err != nil {
-		return fmt.Errorf("failed to parse --options: %s", err)
+		return fmt.Errorf("failed to parse -options: %s", err)
 	}
 
 	if w.args.Overrides.LabelWhiteList != nil {
@@ -376,8 +438,11 @@ func (w *nfdWorker) configure(filepath string, overrides string) error {
 	if w.args.Overrides.SleepInterval != nil {
 		c.Core.SleepInterval = duration{*w.args.Overrides.SleepInterval}
 	}
-	if w.args.Overrides.Sources != nil {
-		c.Core.Sources = *w.args.Overrides.Sources
+	if w.args.Overrides.FeatureSources != nil {
+		c.Core.FeatureSources = *w.args.Overrides.FeatureSources
+	}
+	if w.args.Overrides.LabelSources != nil {
+		c.Core.LabelSources = *w.args.Overrides.LabelSources
 	}
 
 	c.Core.sanitize()
@@ -388,8 +453,8 @@ func (w *nfdWorker) configure(filepath string, overrides string) error {
 		return err
 	}
 
-	// (Re-)configure all "real" sources, test sources are not configurable
-	for _, s := range allSources {
+	// (Re-)configure sources
+	for _, s := range confSources {
 		s.SetConfig(c.Sources[s.Name()])
 	}
 
@@ -400,10 +465,10 @@ func (w *nfdWorker) configure(filepath string, overrides string) error {
 
 // createFeatureLabels returns the set of feature labels from the enabled
 // sources and the whitelist argument.
-func createFeatureLabels(sources []source.FeatureSource, labelWhiteList regexp.Regexp) (labels Labels) {
+func createFeatureLabels(sources []source.LabelSource, labelWhiteList regexp.Regexp) (labels Labels) {
 	labels = Labels{}
 
-	// Do feature discovery from all configured sources.
+	// Get labels from all enabled label sources
 	klog.Info("starting feature discovery...")
 	for _, source := range sources {
 		labelsFromSource, err := getFeatureLabels(source, labelWhiteList)
@@ -423,18 +488,18 @@ func createFeatureLabels(sources []source.FeatureSource, labelWhiteList regexp.R
 
 // getFeatureLabels returns node labels for features discovered by the
 // supplied source.
-func getFeatureLabels(source source.FeatureSource, labelWhiteList regexp.Regexp) (labels Labels, err error) {
+func getFeatureLabels(source source.LabelSource, labelWhiteList regexp.Regexp) (labels Labels, err error) {
 	labels = Labels{}
-	features, err := source.Discover()
+	features, err := source.GetLabels()
 	if err != nil {
 		return nil, err
 	}
 
 	// Prefix for labels in the default namespace
 	prefix := source.Name() + "-"
-	switch source.(type) {
-	case *local.Source:
-		// Do not prefix labels from the hooks
+	switch source.Name() {
+	case "local", "custom":
+		// Do not prefix labels from the custom rules, hooks or feature files
 		prefix = ""
 	}
 
@@ -480,18 +545,30 @@ func getFeatureLabels(source source.FeatureSource, labelWhiteList regexp.Regexp)
 	return labels, nil
 }
 
+// getFeatures returns raw features from all feature sources
+func getFeatures() map[string]*feature.DomainFeatures {
+	features := make(map[string]*feature.DomainFeatures)
+
+	for name, src := range source.GetAllFeatureSources() {
+		features[name] = src.GetFeatures()
+	}
+
+	return features
+}
+
 // advertiseFeatureLabels advertises the feature labels to a Kubernetes node
 // via the NFD server.
-func advertiseFeatureLabels(client pb.LabelerClient, labels Labels) error {
+func (w *nfdWorker) advertiseFeatureLabels(labels Labels) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	klog.Infof("sending labeling request to nfd-master")
 
 	labelReq := pb.SetLabelsRequest{Labels: labels,
+		Features:   getFeatures(),
 		NfdVersion: version.Get(),
 		NodeName:   nfdclient.NodeName()}
-	_, err := client.SetLabels(ctx, &labelReq)
+	_, err := w.client.SetLabels(ctx, &labelReq)
 	if err != nil {
 		klog.Errorf("failed to set node labels: %v", err)
 		return err

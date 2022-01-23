@@ -5,14 +5,10 @@ sort: 4
 ---
 
 # Configuration file reference of nfd-worker
-
-{: .no_toc }
+{: .no_toc}
 
 ## Table of contents
-
-{: .no_toc .text-delta }
-
-***WORK IN PROGRESS.***
+{: .no_toc .text-delta}
 
 1. TOC
 {:toc}
@@ -20,7 +16,7 @@ sort: 4
 ---
 
 See the
-[sample configuration file](https://github.com/kubernetes-sigs/node-feature-discovery/blob/{{site.release}}/nfd-worker.conf.example)
+[sample configuration file](https://github.com/kubernetes-sigs/node-feature-discovery/blob/{{site.release}}/deployment/components/worker-config/nfd-worker.conf.example)
 for a full example configuration.
 
 ## core
@@ -35,7 +31,7 @@ feature (re-)detection, and thus also the interval between node re-labeling. A
 non-positive value implies infinite sleep interval, i.e. no re-detection or
 re-labeling is done.
 
-Note: Overridden by the deprecated `--sleep-interval` command line flag (if
+Note: Overridden by the deprecated `-sleep-interval` command line flag (if
 specified).
 
 Default: `60s`
@@ -47,13 +43,14 @@ core:
   sleepInterval: 60s
 ```
 
-### core.sources
+### core.featureSources
 
-`core.sources` specifies the list of enabled feature sources. A special value
-`all` enables all feature sources.
-
-Note: Overridden by the deprecated `--sources` command line flag (if
-specified).
+`core.featureSources` specifies the list of enabled feature sources. A special
+value `all` enables all sources. Prefixing a source name with `-` indicates
+that the source will be disabled instead - this is only meaningful when used in
+conjunction with `all`. This option allows completely disabling the feature
+detection so that neither standard feature labels are generated nor the raw
+feature data is available for custom rule processing.
 
 Default: `[all]`
 
@@ -61,10 +58,60 @@ Example:
 
 ```yaml
 core:
-  sources:
-    - system
-    - custom
+  # Enable all but cpu and local sources
+  featureSources:
+    - "all"
+    - "-cpu"
+    - "-local"
 ```
+
+```yaml
+core:
+  # Enable only cpu and local sources
+  featureSources:
+    - "cpu"
+    - "local"
+```
+
+### core.labelSources
+
+`core.labelSources` specifies the list of enabled label sources. A special
+value `all` enables all sources. Prefixing a source name with `-` indicates
+that the source will be disabled instead - this is only meaningful when used in
+conjunction with `all`. This configuration option affects the generation of
+node labels but not the actual discovery of the underlying feature data that is
+used e.g. in custom/`NodeFeatureRule` rules.
+
+Note: Overridden by the `-label-sources` and `-sources` command line flags and
+the `core.sources` configurations option (if any of them is specified).
+
+Default: `[all]`
+
+Example:
+
+```yaml
+core:
+  # Enable all but cpu and system sources
+  labelSources:
+    - "all"
+    - "-cpu"
+    - "-system"
+```
+
+```yaml
+core:
+  # Enable only cpu and system sources
+  labelSources:
+    - "cpu"
+    - "system"
+```
+
+### core.sources
+
+**DEPRECATED**: use [`core.labelSources`](#core.labelSources) instead.
+
+Note: `core.sources` takes precedence over the `core.labelSources`
+configuration file option.
 
 ### core.labelWhiteList
 
@@ -75,7 +122,7 @@ Note: The regular expression is only matches against the "basename" part of the
 label, i.e. to the part of the name after '/'. The label prefix (or namespace)
 is omitted.
 
-Note: Overridden by the deprecated `--label-whitelist` command line flag (if
+Note: Overridden by the deprecated `-label-whitelist` command line flag (if
 specified).
 
 Default: `null`
@@ -93,7 +140,7 @@ Setting `core.noPublish` to `true` disables all communication with the
 nfd-master. It is effectively a "dry-run" flag: nfd-worker runs feature
 detection normally, but no labeling requests are sent to nfd-master.
 
-Note: Overridden by the `--no-publish` command line flag (if specified).
+Note: Overridden by the `-no-publish` command line flag (if specified).
 
 Default: `false`
 

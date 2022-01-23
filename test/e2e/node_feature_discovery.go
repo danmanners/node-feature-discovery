@@ -33,8 +33,11 @@ import (
 	v1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/uuid"
+	"k8s.io/apimachinery/pkg/util/wait"
 	clientset "k8s.io/client-go/kubernetes"
+	"k8s.io/kubectl/pkg/util/podutils"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2elog "k8s.io/kubernetes/test/e2e/framework/log"
 	e2enetwork "k8s.io/kubernetes/test/e2e/framework/network"
@@ -107,6 +110,27 @@ func readConfig() {
 		Expect(err).NotTo(HaveOccurred())
 		conf.DefaultFeatures.Nodes[name] = nodeConf
 	}
+}
+
+// waitForPodsReady waits for the pods to become ready.
+// NOTE: copied from k8s v1.22 after which is was removed from there.
+// Convenient for checking that all pods of a daemonset are ready.
+func waitForPodsReady(c clientset.Interface, ns, name string, minReadySeconds int) error {
+	const poll = 2 * time.Second
+	label := labels.SelectorFromSet(labels.Set(map[string]string{"name": name}))
+	options := metav1.ListOptions{LabelSelector: label.String()}
+	return wait.Poll(poll, 5*time.Minute, func() (bool, error) {
+		pods, err := c.CoreV1().Pods(ns).List(context.TODO(), options)
+		if err != nil {
+			return false, nil
+		}
+		for _, pod := range pods.Items {
+			if !podutils.IsPodAvailable(&pod, int32(minReadySeconds), metav1.Now()) {
+				return false, nil
+			}
+		}
+		return true, nil
+	})
 }
 
 // Create required RBAC configuration
@@ -311,7 +335,7 @@ func nfdWorkerPodSpec(image string, extraArgs []string) v1.PodSpec {
 				Image:           image,
 				ImagePullPolicy: v1.PullAlways,
 				Command:         []string{"nfd-worker"},
-				Args:            append([]string{"--server=nfd-master-e2e:8080"}, extraArgs...),
+				Args:            append([]string{"-server=nfd-master-e2e:8080"}, extraArgs...),
 				Env: []v1.EnvVar{
 					{
 						Name: "NODE_NAME",
@@ -426,7 +450,7 @@ func cleanupNode(cs clientset.Interface) {
 			update := false
 			// Remove labels
 			for key := range node.Labels {
-				if strings.HasPrefix(key, master.LabelNs) {
+				if strings.HasPrefix(key, master.FeatureLabelNs) {
 					delete(node.Labels, key)
 					update = true
 				}
@@ -499,9 +523,9 @@ var _ = SIGDescribe("Node Feature Discovery", func() {
 			It("it should decorate the node with the fake feature labels", func() {
 
 				fakeFeatureLabels := map[string]string{
-					master.LabelNs + "/fake-fakefeature1": "true",
-					master.LabelNs + "/fake-fakefeature2": "true",
-					master.LabelNs + "/fake-fakefeature3": "true",
+					master.FeatureLabelNs + "/fake-fakefeature1": "true",
+					master.FeatureLabelNs + "/fake-fakefeature2": "true",
+					master.FeatureLabelNs + "/fake-fakefeature3": "true",
 				}
 
 				// Remove pre-existing stale annotations and labels
@@ -510,7 +534,7 @@ var _ = SIGDescribe("Node Feature Discovery", func() {
 				// Launch nfd-worker
 				By("Creating a nfd worker pod")
 				image := fmt.Sprintf("%s:%s", *dockerRepo, *dockerTag)
-				workerPod := nfdWorkerPod(image, []string{"--oneshot", "--sources=fake"})
+				workerPod := nfdWorkerPod(image, []string{"-oneshot", "-label-sources=fake"})
 				workerPod, err := f.ClientSet.CoreV1().Pods(f.Namespace.Name).Create(context.TODO(), workerPod, metav1.CreateOptions{})
 				Expect(err).NotTo(HaveOccurred())
 
@@ -528,7 +552,7 @@ var _ = SIGDescribe("Node Feature Discovery", func() {
 
 				// Check that there are no unexpected NFD labels
 				for k := range node.Labels {
-					if strings.HasPrefix(k, master.LabelNs) {
+					if strings.HasPrefix(k, master.FeatureLabelNs) {
 						Expect(fakeFeatureLabels).Should(HaveKey(k))
 					}
 				}
@@ -564,7 +588,7 @@ var _ = SIGDescribe("Node Feature Discovery", func() {
 				Expect(err).NotTo(HaveOccurred())
 
 				By("Waiting for daemonset pods to be ready")
-				Expect(e2epod.WaitForPodsReady(f.ClientSet, f.Namespace.Name, workerDS.Spec.Template.Labels["name"], 5)).NotTo(HaveOccurred())
+				Expect(waitForPodsReady(f.ClientSet, f.Namespace.Name, workerDS.Spec.Template.Labels["name"], 5)).NotTo(HaveOccurred())
 
 				By("Getting node objects")
 				nodeList, err := f.ClientSet.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{})
@@ -593,7 +617,7 @@ var _ = SIGDescribe("Node Feature Discovery", func() {
 						Expect(node.Labels).To(HaveKey(k))
 					}
 					for k := range node.Labels {
-						if strings.HasPrefix(k, master.LabelNs) {
+						if strings.HasPrefix(k, master.FeatureLabelNs) {
 							if _, ok := nodeConf.ExpectedLabelValues[k]; ok {
 								continue
 							}
@@ -655,7 +679,7 @@ var _ = SIGDescribe("Node Feature Discovery", func() {
 				Expect(err).NotTo(HaveOccurred())
 				Expect(len(nodeList.Items)).ToNot(BeZero())
 
-				targetNodeName := ""
+				targetNodeName := nodeList.Items[0].Name
 				for _, node := range nodeList.Items {
 					if _, ok := node.Labels["node-role.kubernetes.io/master"]; !ok {
 						targetNodeName = node.Name
@@ -760,7 +784,7 @@ var _ = SIGDescribe("Node Feature Discovery", func() {
 				Expect(err).NotTo(HaveOccurred())
 
 				By("Waiting for daemonset pods to be ready")
-				Expect(e2epod.WaitForPodsReady(f.ClientSet, f.Namespace.Name, workerDS.Spec.Template.Labels["name"], 5)).NotTo(HaveOccurred())
+				Expect(waitForPodsReady(f.ClientSet, f.Namespace.Name, workerDS.Spec.Template.Labels["name"], 5)).NotTo(HaveOccurred())
 
 				By("Getting target node and checking labels")
 				targetNode, err := f.ClientSet.CoreV1().Nodes().Get(context.TODO(), targetNodeName, metav1.GetOptions{})

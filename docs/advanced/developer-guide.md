@@ -5,12 +5,10 @@ sort: 1
 ---
 
 # Developer guide
-
-{: .no_toc }
+{: .no_toc}
 
 ## Table of contents
-
-{: .no_toc .text-delta }
+{: .no_toc .text-delta}
 
 1. TOC
 {:toc}
@@ -44,6 +42,32 @@ Optional, this example with Docker.
 ```bash
 docker push <IMAGE_TAG>
 ```
+
+### Docker multi-arch builds with buildx
+
+The default set of architectures enabled for mulit-arch builds are `linux/amd64`
+and `linux/arm64`. If more architectures are needed one can override the
+`IMAGE_ALL_PLATFORMS` variable with a comma separated list of `OS/ARCH` tuples.
+
+#### Build the manifest-list with a container image per arch
+
+```bash
+make image-all
+```
+
+Currently `docker` does not support loading of manifest-lists meaning the images
+are not shown when executing `docker images`, see:
+[buildx issue #59](https://github.com/docker/buildx/issues/59).
+
+#### Push the manifest-list with container image per arch
+
+```bash
+make push-all
+```
+
+The resulting container image can be used in the same way on each arch by pulling
+e.g. `node-feature-discovery:v0.10.0` without specifying the architechture. The
+manifest-list will take care of providing the right architecture image.
 
 #### Change the job spec to use your custom image (optional)
 
@@ -90,6 +114,8 @@ makefile overrides.
 | HOSTMOUNT_PREFIX           | Prefix of system directories for feature discovery (local builds) | / (*local builds*) /host- (*container builds*)
 | IMAGE_BUILD_CMD            | Command to build the image                                        | docker build
 | IMAGE_BUILD_EXTRA_OPTS     | Extra options to pass to build command                            | *empty*
+| IMAGE_BUILDX_CMD           | Command to build and push multi-arch images with buildx           | DOCKER_CLI_EXPERIMENTAL=enabled docker buildx build --platform=${IMAGE_ALL_PLATFORMS} --progress=auto --pull
+| IMAGE_ALL_PLATFORMS        | Comma seperated list of OS/ARCH tuples for mulit-arch builds    | linux/amd64,linux/arm64
 | IMAGE_PUSH_CMD             | Command to push the image to remote registry                      | docker push
 | IMAGE_REGISTRY             | Container image registry to use                                   | k8s.gcr.io/nfd
 | IMAGE_TAG_NAME             | Container image tag name                                          | &lt;nfd version&gt;
@@ -157,39 +183,6 @@ $ docker run --rm --name=nfd-test ${NFD_CONTAINER_IMAGE} nfd-master -no-publish
 2019/02/01 14:48:21 gRPC server serving on port: 8080
 ```
 
-Command line flags of nfd-master:
-
-```bash
-$ docker run --rm ${NFD_CONTAINER_IMAGE} nfd-master -help
-Usage of nfd-master:
-  -ca-file string
-        Root certificate for verifying connections
-  -cert-file string
-        Certificate used for authenticating connections
-  -extra-label-ns value
-        Comma separated list of allowed extra label namespaces
-  -instance string
-        Instance name. Used to separate annotation namespaces for multiple parallel deployments.
-  -key-file string
-        Private key matching -cert-file
-  -kubeconfig string
-        Kubeconfig to use
-  -label-whitelist value
-        Regular expression to filter label names to publish to the Kubernetes API server. NB: the label namespace is omitted i.e. the filter is only applied to the name part after '/'.
-  -no-publish
-        Do not publish feature labels
-  -port int
-        Port on which to listen for connections. (default 8080)
-  -prune
-        Prune all NFD related attributes from all nodes of the cluaster and exit.
-  -resource-labels value
-        Comma separated list of labels to be exposed as extended resources.
-  -verify-node-name
-        Verify worker node name against the worker's TLS certificate. Only takes effect when TLS authentication has been enabled.
-  -version
-        Print version and exit.
-```
-
 ### NFD-Worker
 
 In order to run nfd-worker as a "stand-alone" container against your
@@ -204,45 +197,41 @@ $ docker run --rm --network=container:nfd-test ${NFD_CONTAINER_IMAGE} nfd-worker
 If you just want to try out feature discovery without connecting to nfd-master,
 pass the `-no-publish` flag to nfd-worker.
 
-Command line flags of nfd-worker:
-
-```bash
-$ docker run --rm ${NFD_CONTAINER_IMAGE} nfd-worker -help
-Usage of nfd-worker:
-  -ca-file string
-        Root certificate for verifying connections
-  -cert-file string
-        Certificate used for authenticating connections
-  -config string
-        Config file to use. (default "/etc/kubernetes/node-feature-discovery/nfd-worker.conf")
-  -key-file string
-        Private key matching -cert-file
-  -label-whitelist value
-        Regular expression to filter label names to publish to the Kubernetes API server. NB: the label namespace is omitted i.e. the filter is only applied to the name part after '/'. DEPRECATED: This parameter should be set via the config file.
-  -no-publish
-        Do not publish discovered features, disable connection to nfd-master.
-  -oneshot
-        Do not publish feature labels
-  -options string
-        Specify config options from command line. Config options are specified in the same format as in the config file (i.e. json or yaml). These options
-  -server string
-        NFD server address to connecto to. (default "localhost:8080")
-  -server-name-override string
-        Hostname expected from server certificate, useful in testing
-  -sleep-interval duration
-        Time to sleep between re-labeling. Non-positive value implies no re-labeling (i.e. infinite sleep). DEPRECATED: This parameter should be set via the config file
-  -sources value
-        Comma separated list of feature sources. Special value 'all' enables all feature sources. DEPRECATED: This parameter should be set via the config file
-  -version
-        Print version and exit.
-```
-
 **NOTE** Some feature sources need certain directories and/or files from the
 host mounted inside the NFD container. Thus, you need to provide Docker with the
 correct `--volume` options in order for them to work correctly when run
 stand-alone directly with `docker run`. See the
 [default deployment](https://github.com/kubernetes-sigs/node-feature-discovery/blob/{{site.release}}/deployment/components/common/worker-mounts.yaml)
 for up-to-date information about the required volume mounts.
+
+### NFD-Topology-Updater
+
+In order to run nfd-topology-updater as a "stand-alone" container against your
+standalone nfd-master you need to run them in the same network namespace:
+
+```bash
+$ docker run --rm --network=container:nfd-test ${NFD_CONTAINER_IMAGE} nfd-topology-updater
+2019/02/01 14:48:56 Node Feature Discovery Topology Updater <NFD_VERSION>
+...
+```
+
+If you just want to try out feature discovery without connecting to nfd-master,
+pass the `-no-publish` flag to nfd-topology-updater.
+
+NOTE:
+
+NFD topology updater needs certain directories and/or files from the
+host mounted inside the NFD container. Thus, you need to provide Docker with the
+correct `--volume` options in order for them to work correctly when run
+stand-alone directly with `docker run`. See the
+[template spec](https://github.com/kubernetes-sigs/node-feature-discovery/blob/{{site.release}}/deployment/components/topology-updater/topologyupdater-mounts.yaml)
+for up-to-date information about the required volume mounts.
+
+[PodResource API][podresource-api] is a prerequisite for nfd-topology-updater.
+Preceding Kubernetes v1.23, the `kubelet` must be started with the following flag:
+`--feature-gates=KubeletPodResourcesGetAllocatable=true`.
+Starting Kubernetes v1.23, the `GetAllocatableResources` is enabled by default
+through `KubeletPodResourcesGetAllocatable` [feature gate][feature-gate].
 
 ## Documentation
 
@@ -274,3 +263,5 @@ This will generate html documentation under `docs/_site/`.
 
 <!-- Links -->
 [e2e-config-sample]: https://github.com/kubernetes-sigs/node-feature-discovery/blob/{{site.release}}/test/e2e/e2e-test-config.exapmle.yaml
+[podresource-api]: https://kubernetes.io/docs/concepts/extend-kubernetes/compute-storage-net/device-plugins/#monitoring-device-plugin-resources
+[feature-gate]: https://kubernetes.io/docs/reference/command-line-tools-reference/feature-gates

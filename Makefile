@@ -13,6 +13,8 @@ BASE_IMAGE_MINIMAL ?= gcr.io/distroless/base
 
 MDL ?= mdl
 
+K8S_CODE_GENERATOR ?= ../code-generator
+
 # Docker base command for working with html documentation.
 # Use host networking because 'jekyll serve' is stupid enough to use the
 # same site url than the "host" it binds to. Thus, all the links will be
@@ -57,6 +59,30 @@ E2E_TEST_CONFIG ?=
 
 LDFLAGS = -ldflags "-s -w -X sigs.k8s.io/node-feature-discovery/pkg/version.version=$(VERSION) -X sigs.k8s.io/node-feature-discovery/source.pathPrefix=$(HOSTMOUNT_PREFIX)"
 
+# multi-arch build with buildx
+IMAGE_ALL_PLATFORMS ?= linux/amd64,linux/arm64
+
+# enable buildx
+ensure-buildx:
+	./hack/init-buildx.sh
+
+IMAGE_BUILDX_CMD ?= DOCKER_CLI_EXPERIMENTAL=enabled docker buildx build --platform=${IMAGE_ALL_PLATFORMS} --progress=auto --pull
+
+IMAGE_BUILD_ARGS = --build-arg VERSION=$(VERSION) \
+	    	   --build-arg HOSTMOUNT_PREFIX=$(CONTAINER_HOSTMOUNT_PREFIX) \
+	    	   --build-arg BASE_IMAGE_FULL=$(BASE_IMAGE_FULL) \
+	    	   --build-arg BASE_IMAGE_MINIMAL=$(BASE_IMAGE_MINIMAL)
+
+IMAGE_BUILD_ARGS_FULL = --target full \
+                	-t $(IMAGE_TAG) \
+	    		$(foreach tag,$(IMAGE_EXTRA_TAGS),-t $(tag)) \
+	    		$(IMAGE_BUILD_EXTRA_OPTS) ./
+
+IMAGE_BUILD_ARGS_MINIMAL = --target minimal \
+                	   -t $(IMAGE_TAG)-minimal \
+	            	   $(foreach tag,$(IMAGE_EXTRA_TAGS),-t $(tag)-minimal) \
+	            	   $(IMAGE_BUILD_EXTRA_OPTS) ./
+
 all: image
 
 build:
@@ -67,25 +93,28 @@ install:
 	$(GO_CMD) install -v $(LDFLAGS) ./cmd/...
 
 image: yamls
-	$(IMAGE_BUILD_CMD) --build-arg VERSION=$(VERSION) \
-	    --target full \
-	    --build-arg HOSTMOUNT_PREFIX=$(CONTAINER_HOSTMOUNT_PREFIX) \
-	    --build-arg BASE_IMAGE_FULL=$(BASE_IMAGE_FULL) \
-	    --build-arg BASE_IMAGE_MINIMAL=$(BASE_IMAGE_MINIMAL) \
-	    -t $(IMAGE_TAG) \
-	    $(foreach tag,$(IMAGE_EXTRA_TAGS),-t $(tag)) \
-	    $(IMAGE_BUILD_EXTRA_OPTS) ./
-	$(IMAGE_BUILD_CMD) --build-arg VERSION=$(VERSION) \
-	    --target minimal \
-	    --build-arg HOSTMOUNT_PREFIX=$(CONTAINER_HOSTMOUNT_PREFIX) \
-	    --build-arg BASE_IMAGE_FULL=$(BASE_IMAGE_FULL) \
-	    --build-arg BASE_IMAGE_MINIMAL=$(BASE_IMAGE_MINIMAL) \
-	    -t $(IMAGE_TAG)-minimal \
-	    $(foreach tag,$(IMAGE_EXTRA_TAGS),-t $(tag)-minimal) \
-	    $(IMAGE_BUILD_EXTRA_OPTS) ./
+	$(IMAGE_BUILD_CMD) $(IMAGE_BUILD_ARGS) $(IMAGE_BUILD_ARGS_FULL)
+	$(IMAGE_BUILD_CMD) $(IMAGE_BUILD_ARGS) $(IMAGE_BUILD_ARGS_MINIMAL)
+
+image-all: ensure-buildx yamls
+# --load : not implemented yet, see: https://github.com/docker/buildx/issues/59
+	$(IMAGE_BUILDX_CMD) $(IMAGE_BUILD_ARGS) $(IMAGE_BUILD_ARGS_FULL)
+	$(IMAGE_BUILDX_CMD) $(IMAGE_BUILD_ARGS) $(IMAGE_BUILD_ARGS_MINIMAL)
+
+
+# clean NFD labels on all nodes
+# devel only
+deploy-prune:
+	kubectl apply -k deployment/overlays/prune/
+	kubectl wait --for=condition=complete job -l app=nfd -n node-feature-discovery
+	kubectl delete -k deployment/overlays/prune/
+
 
 yamls:
 	@./scripts/kustomize.sh $(K8S_NAMESPACE) $(IMAGE_REPO) $(IMAGE_TAG_NAME)
+
+deploy: yamls
+	kubectl apply -k .
 
 templates:
 	@# Need to prepend each line in the sample config with spaces in order to
@@ -98,19 +127,27 @@ templates:
 	    -e "}; /$$end/p; d }" -i deployment/helm/node-feature-discovery/values.yaml
 	@rm nfd-worker.conf.tmp
 
-mock:
-	mockery --name=FeatureSource --dir=source --inpkg --note="Re-generate by running 'make mock'"
-	mockery --name=APIHelpers --dir=pkg/apihelper --inpkg --note="Re-generate by running 'make mock'"
-	mockery --name=LabelerClient --dir=pkg/labeler --inpkg --note="Re-generate by running 'make mock'"
-
-apigen:
-	protoc --go_opt=paths=source_relative --go_out=plugins=grpc:.  pkg/labeler/labeler.proto
+generate:
+	go mod vendor
+	go generate ./cmd/... ./pkg/... ./source/...
+	rm -rf vendor/
+	controller-gen object crd output:crd:stdout paths=./pkg/apis/... > deployment/base/nfd-crds/nodefeaturerule-crd.yaml
+	cp deployment/base/nfd-crds/nodefeaturerule-crd.yaml deployment/helm/node-feature-discovery/manifests/
+	rm -rf sigs.k8s.io
+	$(K8S_CODE_GENERATOR)/generate-groups.sh client,informer,lister \
+	    sigs.k8s.io/node-feature-discovery/pkg/generated \
+	    sigs.k8s.io/node-feature-discovery/pkg/apis \
+	    "nfd:v1alpha1" --output-base=. \
+	    --go-header-file hack/boilerplate.go.txt
+	rm -rf pkg/generated
+	mv sigs.k8s.io/node-feature-discovery/pkg/generated pkg/
+	rm -rf sigs.k8s.io
 
 gofmt:
 	@$(GO_FMT) -w -l $$(find . -name '*.go')
 
 gofmt-verify:
-	@out=`$(GO_FMT) -l -d $$(find . -name '*.go')`; \
+	@out=`$(GO_FMT) -w -l -d $$(find . -name '*.go')`; \
 	if [ -n "$$out" ]; then \
 	    echo "$$out"; \
 	    exit 1; \
@@ -129,7 +166,7 @@ helm-lint:
 	helm lint --strict deployment/helm/node-feature-discovery/
 
 test:
-	$(GO_CMD) test ./cmd/... ./pkg/...
+	$(GO_CMD) test ./cmd/... ./pkg/... ./source/...
 
 e2e-test:
 	@if [ -z ${KUBECONFIG} ]; then echo "[ERR] KUBECONFIG missing, must be defined"; exit 1; fi
@@ -144,6 +181,10 @@ push:
 	$(IMAGE_PUSH_CMD) $(IMAGE_TAG)
 	$(IMAGE_PUSH_CMD) $(IMAGE_TAG)-minimal
 	for tag in $(IMAGE_EXTRA_TAGS); do $(IMAGE_PUSH_CMD) $$tag; $(IMAGE_PUSH_CMD) $$tag-minimal; done
+
+push-all: ensure-buildx yamls
+	$(IMAGE_BUILDX_CMD) --push $(IMAGE_BUILD_ARGS) $(IMAGE_BUILD_ARGS_FULL)
+	$(IMAGE_BUILDX_CMD) --push $(IMAGE_BUILD_ARGS) $(IMAGE_BUILD_ARGS_MINIMAL)
 
 poll-images:
 	set -e; \

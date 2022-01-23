@@ -54,7 +54,7 @@ func setupTest(args *master.Args) testContext {
 		ctx.errs <- ctx.master.Run()
 		close(ctx.errs)
 	}()
-	ready := ctx.master.WaitForReady(time.Second)
+	ready := ctx.master.WaitForReady(5 * time.Second)
 	if !ready {
 		fmt.Println("Test setup failed: timeout while waiting for nfd-master")
 		os.Exit(1)
@@ -75,7 +75,7 @@ func teardownTest(ctx testContext) {
 
 func TestNewNfdWorker(t *testing.T) {
 	Convey("When initializing new NfdWorker instance", t, func() {
-		Convey("When one of --cert-file, --key-file or --ca-file is missing", func() {
+		Convey("When one of -cert-file, -key-file or -ca-file is missing", func() {
 			_, err := worker.NewNfdWorker(&worker.Args{Args: nfdclient.Args{CertFile: "crt", KeyFile: "key"}})
 			_, err2 := worker.NewNfdWorker(&worker.Args{Args: nfdclient.Args{KeyFile: "key", CaFile: "ca"}})
 			_, err3 := worker.NewNfdWorker(&worker.Args{Args: nfdclient.Args{CertFile: "crt", CaFile: "ca"}})
@@ -97,7 +97,7 @@ func TestRun(t *testing.T) {
 				Args: nfdclient.Args{
 					Server: "localhost:8192"},
 				Oneshot:   true,
-				Overrides: worker.ConfigOverrideArgs{Sources: &utils.StringSliceVal{"fake"}},
+				Overrides: worker.ConfigOverrideArgs{LabelSources: &utils.StringSliceVal{"fake"}},
 			}
 			fooasdf, _ := worker.NewNfdWorker(args)
 			err := fooasdf.Run()
@@ -128,7 +128,7 @@ func TestRunTls(t *testing.T) {
 					ServerNameOverride: "nfd-test-master",
 				},
 				Oneshot:   true,
-				Overrides: worker.ConfigOverrideArgs{Sources: &utils.StringSliceVal{"fake"}},
+				Overrides: worker.ConfigOverrideArgs{LabelSources: &utils.StringSliceVal{"fake"}},
 			}
 			w, _ := worker.NewNfdWorker(&workerArgs)
 			err := w.Run()

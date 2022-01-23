@@ -5,12 +5,10 @@ sort: 3
 ---
 
 # Commandline flags of nfd-worker
-
-{: .no_toc }
+{: .no_toc}
 
 ## Table of contents
-
-{: .no_toc .text-delta }
+{: .no_toc .text-delta}
 
 1. TOC
 {:toc}
@@ -138,12 +136,18 @@ Example:
 nfd-worker -server-name-override=localhost
 ```
 
-### -sources
+### -feature-sources
 
-The `-sources` flag specifies a comma-separated list of enabled feature
-sources. A special value `all` enables all feature sources.
+The `-feature-sources` flag specifies a comma-separated list of enabled feature
+sources. A special value `all` enables all sources. Prefixing a source name
+with `-` indicates that the source will be disabled instead - this is only
+meaningful when used in conjunction with `all`. This command line flag allows
+completely disabling the feature detection so that neither standard feature
+labels are generated nor the raw feature data is available for custom rule
+processing.  Consider using the `core.featureSources` config file option,
+instead, allowing dynamic configurability.
 
-Note: This flag takes precedence over the `core.sources` configuration
+Note: This flag takes precedence over the `core.featureSources` configuration
 file option.
 
 Default: all
@@ -151,11 +155,32 @@ Default: all
 Example:
 
 ```bash
-nfd-worker -sources=kernel,system,local
+nfd-worker -feature-sources=all,-pci
 ```
 
-**DEPRECATED**: you should use the `core.sources` option in the
-configuration file, instead.
+### -label-sources
+
+The `-label-sources` flag specifies a comma-separated list of enabled label
+sources. A special value `all` enables all sources. Prefixing a source name
+with `-` indicates that the source will be disabled instead - this is only
+meaningful when used in conjunction with `all`. Consider using the
+`core.labelSources` config file option, instead, allowing dynamic
+configurability.
+
+Note: This flag takes precedence over the `core.labelSources` configuration
+file option.
+
+Default: all
+
+Example:
+
+```bash
+nfd-worker -label-sources=kernel,system,local
+```
+
+### -sources
+
+**DEPRECATED**: use [`-label-sources`](#-label-sources) instead.
 
 ### -no-publish
 

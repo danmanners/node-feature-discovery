@@ -27,10 +27,15 @@ import (
 
 	"k8s.io/klog/v2"
 
+	"sigs.k8s.io/node-feature-discovery/pkg/api/feature"
+	"sigs.k8s.io/node-feature-discovery/pkg/utils"
 	"sigs.k8s.io/node-feature-discovery/source"
 )
 
+// Name of this feature source
 const Name = "local"
+
+const LabelFeature = "label"
 
 // Config
 var (
@@ -38,23 +43,39 @@ var (
 	hookDir         = "/etc/kubernetes/node-feature-discovery/source.d/"
 )
 
-// Source implements FeatureSource interface
-type Source struct{}
+// localSource implements the FeatureSource and LabelSource interfaces.
+type localSource struct {
+	features *feature.DomainFeatures
+}
 
-// Name returns the name of the feature source
-func (s Source) Name() string { return Name }
+// Singleton source instance
+var (
+	src localSource
+	_   source.FeatureSource = &src
+	_   source.LabelSource   = &src
+)
 
-// NewConfig method of the FeatureSource interface
-func (s *Source) NewConfig() source.Config { return nil }
+// Name method of the LabelSource interface
+func (s *localSource) Name() string { return Name }
 
-// GetConfig method of the FeatureSource interface
-func (s *Source) GetConfig() source.Config { return nil }
+// Priority method of the LabelSource interface
+func (s *localSource) Priority() int { return 20 }
 
-// SetConfig method of the FeatureSource interface
-func (s *Source) SetConfig(source.Config) {}
+// GetLabels method of the LabelSource interface
+func (s *localSource) GetLabels() (source.FeatureLabels, error) {
+	labels := make(source.FeatureLabels)
+	features := s.GetFeatures()
 
-// Discover returns features from hooks and files
-func (s Source) Discover() (source.Features, error) {
+	for k, v := range features.Values[LabelFeature].Elements {
+		labels[k] = v
+	}
+	return labels, nil
+}
+
+// Discover method of the FeatureSource interface
+func (s *localSource) Discover() error {
+	s.features = feature.NewDomainFeatures()
+
 	featuresFromHooks, err := getFeaturesFromHooks()
 	if err != nil {
 		klog.Error(err)
@@ -68,33 +89,34 @@ func (s Source) Discover() (source.Features, error) {
 	// Merge features from hooks and files
 	for k, v := range featuresFromHooks {
 		if old, ok := featuresFromFiles[k]; ok {
-			klog.Warningf("overriding label '%s': value changed from '%s' to '%s'",
+			klog.Warningf("overriding '%s': value changed from '%s' to '%s'",
 				k, old, v)
 		}
 		featuresFromFiles[k] = v
 	}
+	s.features.Values[LabelFeature] = feature.NewValueFeatures(featuresFromFiles)
 
-	return featuresFromFiles, nil
+	utils.KlogDump(3, "discovered local features:", "  ", s.features)
+
+	return nil
 }
 
-func parseFeatures(lines [][]byte, prefix string) source.Features {
-	features := source.Features{}
+// GetFeatures method of the FeatureSource Interface
+func (s *localSource) GetFeatures() *feature.DomainFeatures {
+	if s.features == nil {
+		s.features = feature.NewDomainFeatures()
+	}
+	return s.features
+}
+
+func parseFeatures(lines [][]byte) map[string]string {
+	features := make(map[string]string)
 
 	for _, line := range lines {
 		if len(line) > 0 {
 			lineSplit := strings.SplitN(string(line), "=", 2)
 
-			// Check if we need to add prefix
-			var key string
-			if strings.Contains(lineSplit[0], "/") {
-				if lineSplit[0][0] == '/' {
-					key = lineSplit[0][1:]
-				} else {
-					key = lineSplit[0]
-				}
-			} else {
-				key = prefix + "-" + lineSplit[0]
-			}
+			key := lineSplit[0]
 
 			// Check if it's a boolean value
 			if len(lineSplit) == 1 {
@@ -109,8 +131,8 @@ func parseFeatures(lines [][]byte, prefix string) source.Features {
 }
 
 // Run all hooks and get features
-func getFeaturesFromHooks() (source.Features, error) {
-	features := source.Features{}
+func getFeaturesFromHooks() (map[string]string, error) {
+	features := make(map[string]string)
 
 	files, err := ioutil.ReadDir(hookDir)
 	if err != nil {
@@ -130,7 +152,9 @@ func getFeaturesFromHooks() (source.Features, error) {
 		}
 
 		// Append features
-		for k, v := range parseFeatures(lines, fileName) {
+		fileFeatures := parseFeatures(lines)
+		utils.KlogDump(4, fmt.Sprintf("features from hook %q:", fileName), "  ", fileFeatures)
+		for k, v := range fileFeatures {
 			if old, ok := features[k]; ok {
 				klog.Warningf("overriding label '%s' from another hook (%s): value changed from '%s' to '%s'",
 					k, fileName, old, v)
@@ -184,8 +208,8 @@ func runHook(file string) ([][]byte, error) {
 }
 
 // Read all files to get features
-func getFeaturesFromFiles() (source.Features, error) {
-	features := source.Features{}
+func getFeaturesFromFiles() (map[string]string, error) {
+	features := make(map[string]string)
 
 	files, err := ioutil.ReadDir(featureFilesDir)
 	if err != nil {
@@ -205,7 +229,9 @@ func getFeaturesFromFiles() (source.Features, error) {
 		}
 
 		// Append features
-		for k, v := range parseFeatures(lines, fileName) {
+		fileFeatures := parseFeatures(lines)
+		utils.KlogDump(4, fmt.Sprintf("features from feature file %q:", fileName), "  ", fileFeatures)
+		for k, v := range fileFeatures {
 			if old, ok := features[k]; ok {
 				klog.Warningf("overriding label '%s' from another features.d file (%s): value changed from '%s' to '%s'",
 					k, fileName, old, v)
@@ -239,4 +265,8 @@ func getFileContent(fileName string) ([][]byte, error) {
 	}
 
 	return lines, nil
+}
+
+func init() {
+	source.Register(&src)
 }

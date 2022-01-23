@@ -17,54 +17,21 @@ limitations under the License.
 package rules
 
 import (
-	"encoding/json"
-	"strings"
+	"fmt"
 
-	"sigs.k8s.io/node-feature-discovery/source/internal/kernelutils"
+	nfdv1alpha1 "sigs.k8s.io/node-feature-discovery/pkg/apis/nfd/v1alpha1"
+	"sigs.k8s.io/node-feature-discovery/source/kernel"
 )
 
-// KconfigRule implements Rule
-type KconfigRule []kconfig
-
-type kconfig struct {
-	Name  string
-	Value string
+// KconfigRule implements Rule for the custom source
+type KconfigRule struct {
+	nfdv1alpha1.MatchExpressionSet
 }
 
-var kConfigs map[string]string
-
-func (kconfigs *KconfigRule) Match() (bool, error) {
-	for _, f := range *kconfigs {
-		if v, ok := kConfigs[f.Name]; !ok || f.Value != v {
-			return false, nil
-		}
+func (r *KconfigRule) Match() (bool, error) {
+	options := kernel.GetLegacyKconfig()
+	if options == nil {
+		return false, fmt.Errorf("kernel config options not available")
 	}
-	return true, nil
-}
-
-func (c *kconfig) UnmarshalJSON(data []byte) error {
-	var raw string
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
-	}
-
-	split := strings.SplitN(raw, "=", 2)
-	c.Name = split[0]
-	if len(split) == 1 {
-		c.Value = "true"
-	} else {
-		c.Value = split[1]
-	}
-	return nil
-}
-
-func init() {
-	kConfigs = make(map[string]string)
-
-	kconfig, err := kernelutils.ParseKconfig("")
-	if err == nil {
-		for k, v := range kconfig {
-			kConfigs[k] = v
-		}
-	}
+	return r.MatchValues(options)
 }
